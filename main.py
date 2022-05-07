@@ -53,8 +53,12 @@ parser.add_argument('--cpu', dest='cpu', action='store_true',
 parser.add_argument('--save-dir', dest='save_dir',
                     help='The directory used to save the trained models',
                     default='save_temp', type=str)
-
-
+parser.add_argument('--data-dir', dest='data_dir',
+                    help='The directory where cifar-10-batches-py is located',
+                    default='.', type=str)
+parser.add_argument('--valid-size', dest='valid_size',
+                    help='The size of the validation dataset (this will be split from the training dataset)',
+                    default=5000, type=int)
 best_prec1 = 0
 
 
@@ -69,7 +73,6 @@ def main():
 
     model = vgg.__dict__[args.arch]()
 
-    model.features = torch.nn.DataParallel(model.features)
     if args.cpu:
         model.cpu()
     else:
@@ -90,26 +93,15 @@ def main():
 
     cudnn.benchmark = True
 
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
+    dataset = datasets.CIFAR10(args.data_dir, train=True, transform=transforms.ToTensor(), download=False)
+    train_dataset, valid_dataset = torch.utils.data.random_split(
+        dataset,
+        [len(dataset) - args.valid_size, args.valid_size],
+        generator=torch.Generator().manual_seed(1)
+    )
 
-    train_loader = torch.utils.data.DataLoader(
-        datasets.CIFAR10(root='./data', train=True, transform=transforms.Compose([
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomCrop(32, 4),
-            transforms.ToTensor(),
-            normalize,
-        ]), download=True),
-        batch_size=args.batch_size, shuffle=True,
-        num_workers=args.workers, pin_memory=True)
-
-    val_loader = torch.utils.data.DataLoader(
-        datasets.CIFAR10(root='./data', train=False, transform=transforms.Compose([
-            transforms.ToTensor(),
-            normalize,
-        ])),
-        batch_size=args.batch_size, shuffle=False,
-        num_workers=args.workers, pin_memory=True)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=True)
+    val_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True)
 
     # define loss function (criterion) and pptimizer
     criterion = nn.CrossEntropyLoss()
@@ -153,6 +145,11 @@ def train(train_loader, model, criterion, optimizer, epoch):
     """
         Run one train epoch
     """
+    train_transform = transforms.Compose([
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomCrop(32, padding=4)
+    ])
+
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -168,12 +165,13 @@ def train(train_loader, model, criterion, optimizer, epoch):
         data_time.update(time.time() - end)
 
         if args.cpu == False:
-            input = input.cuda(async=True)
-            target = target.cuda(async=True)
+            input = input.cuda()
+            target = target.cuda()
         if args.half:
             input = input.half()
 
         # compute output
+        input = train_transform(input)
         output = model(input)
         loss = criterion(output, target)
 
@@ -217,8 +215,8 @@ def validate(val_loader, model, criterion):
     end = time.time()
     for i, (input, target) in enumerate(val_loader):
         if args.cpu == False:
-            input = input.cuda(async=True)
-            target = target.cuda(async=True)
+            input = input.cuda()
+            target = target.cuda()
 
         if args.half:
             input = input.half()
